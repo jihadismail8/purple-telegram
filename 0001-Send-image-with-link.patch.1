@@ -1,0 +1,183 @@
+From 3427ea6063eac33088194f598e44d6d10c5ba691 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=9A=D0=B8=D1=80=D0=B8=D0=BB=D0=BB=20=D0=97=D0=B8=D0=BC?=
+ =?UTF-8?q?=D0=BD=D0=B8=D0=BA=D0=BE=D0=B2?= <kirill@zimnikov.ru>
+Date: Fri, 10 Mar 2017 10:57:19 +0700
+Subject: [PATCH] Send image with link
+
+---
+ Makefile.in  |   4 +--
+ tgp-msg.c    |   5 +++
+ uploadfile.c | 101 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ uploadfile.h |   7 +++++
+ 4 files changed, 115 insertions(+), 2 deletions(-)
+ create mode 100644 uploadfile.c
+ create mode 100644 uploadfile.h
+
+diff --git a/Makefile.in b/Makefile.in
+index 9d7de7d..a705eec 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -23,7 +23,7 @@ localedir=@localedir@
+ gettext_package=@GETTEXT_PACKAGE@
+ 
+ CFLAGS=@CFLAGS@ @PURPLE_CFLAGS@ @DEFS@ -DENABLE_NLS -DLOCALEDIR='"$(localedir)"' -Wall -Wextra -Wno-deprecated-declarations -Wno-unused-parameter -I${srcdir} -I. -fno-strict-aliasing -fPIC
+-LDFLAGS=@LDFLAGS@ @OPENSSL_LIBS@ @PURPLE_LIBS@ @LIBS@ -rdynamic -ggdb
++LDFLAGS=@LDFLAGS@ @OPENSSL_LIBS@ @PURPLE_LIBS@ @LIBS@ -rdynamic -ggdb -lcurl
+ DIR_PERM=0755
+ FILE_PERM=0644
+ 
+@@ -36,7 +36,7 @@ EXE=bin
+ OBJ=objs
+ DIR_LIST=${DEP} ${EXE} ${OBJ}
+ 
+-PLUGIN_OBJECTS=${OBJ}/tgp-net.o ${OBJ}/tgp-timers.o ${OBJ}/msglog.o ${OBJ}/telegram-base.o ${OBJ}/telegram-purple.o ${OBJ}/tgp-2prpl.o ${OBJ}/tgp-structs.o ${OBJ}/tgp-utils.o ${OBJ}/tgp-chat.o ${OBJ}/tgp-ft.o ${OBJ}/tgp-msg.o ${OBJ}/tgp-request.o ${OBJ}/tgp-blist.o ${OBJ}/tgp-info.o
++PLUGIN_OBJECTS=${OBJ}/tgp-net.o ${OBJ}/tgp-timers.o ${OBJ}/msglog.o ${OBJ}/telegram-base.o ${OBJ}/telegram-purple.o ${OBJ}/tgp-2prpl.o ${OBJ}/tgp-structs.o ${OBJ}/tgp-utils.o ${OBJ}/tgp-chat.o ${OBJ}/tgp-ft.o ${OBJ}/tgp-msg.o ${OBJ}/tgp-request.o ${OBJ}/tgp-blist.o ${OBJ}/tgp-info.o ${OBJ}/uploadfile.o
+ ALL_OBJS=${PLUGIN_OBJECTS}
+ 
+ ifdef MSGFMT_PATH
+diff --git a/tgp-msg.c b/tgp-msg.c
+index 094deab..f994ab7 100644
+--- a/tgp-msg.c
++++ b/tgp-msg.c
+@@ -19,6 +19,7 @@
+  */
+ 
+ #include "telegram-purple.h"
++#include "uploadfile.h"
+ 
+ #include <errno.h>
+ #include <locale.h>
+@@ -335,6 +336,10 @@ int tgp_msg_send (struct tgl_state *TLS, const char *message, tgl_peer_id_t to)
+       tgl_do_send_document (TLS, to, tmp, NULL, 0,
+           TGL_SEND_MSG_FLAG_DOCUMENT_AUTO | (tgl_get_peer_type (to) == TGL_PEER_CHANNEL) ? TGLMF_POST_AS_CHANNEL : 0,
+           send_inline_picture_done, NULL);
++ 
++      char link[256]; link[0] = 0;
++      if (uploadFile(tmp, purple_imgstore_get_data(psi), purple_imgstore_get_size(psi), link, 256) && link[0] != 0) 
++        tgp_msg_send(TLS, link, to);
+     } else {
+       failure ("error=%s", err->message);
+       g_warn_if_reached();
+diff --git a/uploadfile.c b/uploadfile.c
+new file mode 100644
+index 0000000..c77f964
+--- /dev/null
++++ b/uploadfile.c
+@@ -0,0 +1,101 @@
++#include <stdio.h>
++#include <string.h>
++
++#include <curl/curl.h>
++
++#include "uploadfile.h"
++
++char IS_CURL_INIT = 0;
++
++const size_t BUF_SIZE= 5000000;
++size_t wr_index = 0;
++
++static size_t write_data_func(char *ptr, size_t size, size_t nmemb, char* data)
++{
++    if(data==NULL || wr_index + size*nmemb > BUF_SIZE) return 0; // Если выход за размеры буфера - ошибка
++
++    memcpy( &data[wr_index], ptr, size*nmemb);// дописываем данные в конец
++    wr_index += size*nmemb;  // изменяем  текущее положение
++
++    return size*nmemb;
++}
++
++int uploadFile(const char* fileName, const void* buffer, size_t bufferSize, char* buff_out, size_t outBufferSize)
++{
++    if (IS_CURL_INIT == 0) {
++        IS_CURL_INIT = 1;
++        curl_global_init(CURL_GLOBAL_ALL);
++    }
++    struct curl_httppost *formpost=NULL;
++    struct curl_httppost *lastptr=NULL;
++
++    /* Fill in the file upload field */
++    curl_formadd(&formpost,
++                 &lastptr,
++                 CURLFORM_COPYNAME, "file",
++                 CURLFORM_BUFFER, fileName,
++                 CURLFORM_BUFFERPTR, buffer,
++                 CURLFORM_BUFFERLENGTH, bufferSize,
++                 CURLFORM_END);
++
++
++    /* Fill in the submit field too, even if this is rarely needed */
++    curl_formadd(&formpost,
++                 &lastptr,
++                 CURLFORM_COPYNAME, "submit",
++                 CURLFORM_COPYCONTENTS, "send",
++                 CURLFORM_END);
++
++    CURL *curl = curl_easy_init();
++    if (curl)
++    {
++        /* what URL that receives this POST */
++        curl_easy_setopt(curl, CURLOPT_URL, "http://84.245.225.2:1080/fileupload.php");
++
++        struct curl_slist *headerlist=NULL;
++        headerlist = curl_slist_append(headerlist, "Content-Type: multipart/form-data");
++        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerlist);
++
++        curl_easy_setopt(curl, CURLOPT_HTTPPOST, formpost);
++
++        wr_index = 0;
++        char   wr_buf[BUF_SIZE+1];  // char*   wr_buf[BUF_SIZE+1];
++        curl_easy_setopt(curl, CURLOPT_WRITEDATA, wr_buf);
++        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data_func);
++
++        /* Perform the request, res will get the return code */
++        CURLcode res = curl_easy_perform(curl);
++        /* Check for errors */
++        if(res != CURLE_OK)
++            fprintf(stderr, "curl_easy_perform() failed: %s\n",
++                    curl_easy_strerror(res));
++        else {
++            if (strncmp(wr_buf, "{\"url\":\"", 8) == 0) {
++                size_t len = strlen(wr_buf + 8);
++                if (len > 2 && len < outBufferSize) {
++                    len -= 2;
++                    char* ptr = wr_buf + 8;
++
++                    while (len-- > 0) {
++                        if (*ptr != '\\') {
++                            *buff_out++ = *ptr;
++                        }
++                        ++ptr;
++                    }
++                    *buff_out = 0;
++                }
++            }
++        }
++
++        /* always cleanup */
++        curl_easy_cleanup(curl);
++
++        /* then cleanup the formpost chain */
++        curl_formfree(formpost);
++        /* free slist */
++        curl_slist_free_all (headerlist);
++
++        return res == CURLE_OK;
++    }
++    return 1;
++}
+diff --git a/uploadfile.h b/uploadfile.h
+new file mode 100644
+index 0000000..36565e3
+--- /dev/null
++++ b/uploadfile.h
+@@ -0,0 +1,7 @@
++#ifndef UPLOADFILE_H
++#define UPLOADFILE_H
++
++int uploadFile(const char* fileName, const void *buffer, size_t bufferSize, char* buff_out, size_t outBufferSize);
++
++#endif // UPLOADFILE_H
++
+-- 
+2.9.3
+
